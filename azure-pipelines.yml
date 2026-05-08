@@ -1,60 +1,231 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
-
 trigger:
-- main
+  branches:
+    include:
+      - main
+      - develop
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
 
 pool:
   vmImage: ubuntu-latest
 
 variables:
-  ARM_SERVICE_CONNECTION: "azure-terraform-conn"
+  terraformVersion: "1.8.5"
+  terraformWorkingDirectory: "$(System.DefaultWorkingDirectory)"
+  azureServiceConnection: "azure-terraform-conn"
+  backendResourceGroupName: "tfstate-rg"
+  backendStorageAccountName: "tfstatekp2026dev123"
+  backendContainerName: "tfstate"
+  backendKeyDev: "terraform-dev.tfstate"
+  backendKeyProd: "terraform-prod.tfstate"
 
 stages:
-- stage: TerraformInitPlan
+- stage: Validate
+  displayName: "Terraform Validate"
   jobs:
-  - job: InitPlan
+  - job: ValidateJob
+    displayName: "Validate Terraform Configuration"
     steps:
+    - checkout: self
 
     - task: TerraformInstaller@1
+      displayName: "Install Terraform"
       inputs:
-        terraformVersion: 'latest'
+        terraformVersion: "$(terraformVersion)"
+
+    - script: terraform fmt -check -recursive
+      displayName: "Terraform Format Check"
+      workingDirectory: "$(terraformWorkingDirectory)"
 
     - task: TerraformTaskV4@4
-      displayName: Terraform Init
+      displayName: "Terraform Init (no backend)"
       inputs:
-        provider: 'azurerm'
-        command: 'init'
-        backendServiceArm: $(ARM_SERVICE_CONNECTION)
-        backendAzureRmResourceGroupName: 'tfstate-rg'
-        backendAzureRmStorageAccountName: 'tfstatekp2026dev123'
-        backendAzureRmContainerName: 'tfstate'
-        backendAzureRmKey: 'terraform.tfstate'
+        provider: "azurerm"
+        command: "init"
+        workingDirectory: "$(terraformWorkingDirectory)"
+        commandOptions: "-backend=false"
 
     - task: TerraformTaskV4@4
-      displayName: Terraform Plan
+      displayName: "Terraform Validate"
       inputs:
-        provider: 'azurerm'
-        command: 'plan'
-        environmentServiceNameAzureRM: $(ARM_SERVICE_CONNECTION)
+        provider: "azurerm"
+        command: "validate"
+        workingDirectory: "$(terraformWorkingDirectory)"
 
-- stage: TerraformApply
-  dependsOn: TerraformInitPlan
-  condition: succeeded()
+- stage: PlanDev
+  displayName: "Terraform Plan (Dev)"
+  dependsOn: Validate
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
   jobs:
-  - deployment: Apply
-    environment: 'dev'
+  - job: PlanDevJob
+    displayName: "Create Terraform Plan (Dev)"
+    steps:
+    - checkout: self
+
+    - script: mkdir -p "$(Pipeline.Workspace)/tfplan"
+      displayName: "Create plan artifact directory"
+
+    - task: TerraformInstaller@1
+      displayName: "Install Terraform"
+      inputs:
+        terraformVersion: "$(terraformVersion)"
+
+    - task: TerraformTaskV4@4
+      displayName: "Terraform Init (dev backend)"
+      inputs:
+        provider: "azurerm"
+        command: "init"
+        workingDirectory: "$(terraformWorkingDirectory)"
+        backendServiceArm: "$(azureServiceConnection)"
+        backendAzureRmResourceGroupName: "$(backendResourceGroupName)"
+        backendAzureRmStorageAccountName: "$(backendStorageAccountName)"
+        backendAzureRmContainerName: "$(backendContainerName)"
+        backendAzureRmKey: "$(backendKeyDev)"
+
+    - task: TerraformTaskV4@4
+      displayName: "Terraform Plan"
+      inputs:
+        provider: "azurerm"
+        command: "plan"
+        workingDirectory: "$(terraformWorkingDirectory)"
+        environmentServiceNameAzureRM: "$(azureServiceConnection)"
+        commandOptions: "-out=$(Pipeline.Workspace)/tfplan/tfplan -input=false"
+
+    - publish: "$(Pipeline.Workspace)/tfplan"
+      artifact: "terraformPlanDev"
+      displayName: "Publish Terraform Plan Artifact (Dev)"
+
+- stage: ApplyDev
+  displayName: "Terraform Apply (Dev)"
+  dependsOn: PlanDev
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+  jobs:
+  - deployment: ApplyDev
+    displayName: "Apply Infrastructure Changes (Dev)"
+    environment: "dev"
     strategy:
       runOnce:
         deploy:
           steps:
+          - checkout: self
+
+          - download: current
+            artifact: "terraformPlanDev"
+            displayName: "Download Terraform Plan Artifact (Dev)"
+
+          - task: TerraformInstaller@1
+            displayName: "Install Terraform"
+            inputs:
+              terraformVersion: "$(terraformVersion)"
 
           - task: TerraformTaskV4@4
-            displayName: Terraform Apply
+            displayName: "Terraform Init (dev backend)"
             inputs:
-              provider: 'azurerm'
-              command: 'apply'
-              environmentServiceNameAzureRM: $(ARM_SERVICE_CONNECTION)
-              args: '-auto-approve'
+              provider: "azurerm"
+              command: "init"
+              workingDirectory: "$(terraformWorkingDirectory)"
+              backendServiceArm: "$(azureServiceConnection)"
+              backendAzureRmResourceGroupName: "$(backendResourceGroupName)"
+              backendAzureRmStorageAccountName: "$(backendStorageAccountName)"
+              backendAzureRmContainerName: "$(backendContainerName)"
+              backendAzureRmKey: "$(backendKeyDev)"
+
+          - task: TerraformTaskV4@4
+            displayName: "Terraform Apply saved plan"
+            inputs:
+              provider: "azurerm"
+              command: "apply"
+              workingDirectory: "$(terraformWorkingDirectory)"
+              environmentServiceNameAzureRM: "$(azureServiceConnection)"
+              commandOptions: "-input=false $(Pipeline.Workspace)/terraformPlanDev/tfplan"
+
+- stage: PlanProd
+  displayName: "Terraform Plan (Prod)"
+  dependsOn: Validate
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - job: PlanProdJob
+    displayName: "Create Terraform Plan (Prod)"
+    steps:
+    - checkout: self
+
+    - script: mkdir -p "$(Pipeline.Workspace)/tfplan"
+      displayName: "Create plan artifact directory"
+
+    - task: TerraformInstaller@1
+      displayName: "Install Terraform"
+      inputs:
+        terraformVersion: "$(terraformVersion)"
+
+    - task: TerraformTaskV4@4
+      displayName: "Terraform Init (prod backend)"
+      inputs:
+        provider: "azurerm"
+        command: "init"
+        workingDirectory: "$(terraformWorkingDirectory)"
+        backendServiceArm: "$(azureServiceConnection)"
+        backendAzureRmResourceGroupName: "$(backendResourceGroupName)"
+        backendAzureRmStorageAccountName: "$(backendStorageAccountName)"
+        backendAzureRmContainerName: "$(backendContainerName)"
+        backendAzureRmKey: "$(backendKeyProd)"
+
+    - task: TerraformTaskV4@4
+      displayName: "Terraform Plan"
+      inputs:
+        provider: "azurerm"
+        command: "plan"
+        workingDirectory: "$(terraformWorkingDirectory)"
+        environmentServiceNameAzureRM: "$(azureServiceConnection)"
+        commandOptions: "-out=$(Pipeline.Workspace)/tfplan/tfplan -input=false"
+
+    - publish: "$(Pipeline.Workspace)/tfplan"
+      artifact: "terraformPlanProd"
+      displayName: "Publish Terraform Plan Artifact (Prod)"
+
+- stage: ApplyProd
+  displayName: "Terraform Apply (Prod)"
+  dependsOn: PlanProd
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: ApplyProd
+    displayName: "Apply Infrastructure Changes (Prod)"
+    environment: "prod"
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+
+          - download: current
+            artifact: "terraformPlanProd"
+            displayName: "Download Terraform Plan Artifact (Prod)"
+
+          - task: TerraformInstaller@1
+            displayName: "Install Terraform"
+            inputs:
+              terraformVersion: "$(terraformVersion)"
+
+          - task: TerraformTaskV4@4
+            displayName: "Terraform Init (prod backend)"
+            inputs:
+              provider: "azurerm"
+              command: "init"
+              workingDirectory: "$(terraformWorkingDirectory)"
+              backendServiceArm: "$(azureServiceConnection)"
+              backendAzureRmResourceGroupName: "$(backendResourceGroupName)"
+              backendAzureRmStorageAccountName: "$(backendStorageAccountName)"
+              backendAzureRmContainerName: "$(backendContainerName)"
+              backendAzureRmKey: "$(backendKeyProd)"
+
+          - task: TerraformTaskV4@4
+            displayName: "Terraform Apply saved plan"
+            inputs:
+              provider: "azurerm"
+              command: "apply"
+              workingDirectory: "$(terraformWorkingDirectory)"
+              environmentServiceNameAzureRM: "$(azureServiceConnection)"
+              commandOptions: "-input=false $(Pipeline.Workspace)/terraformPlanProd/tfplan"

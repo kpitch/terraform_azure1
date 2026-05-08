@@ -1,0 +1,8 @@
+location            = "southcentralus"
+resource_group_name = "elekta-devops-test"
+admin_username      = "ElektaAdmin"
+
+# Do not commit secrets to git.
+# Pass this value through:
+# - local shell env: export TF_VAR_admin_password='...'
+# - Azure DevOps secret variable: TF_VAR_admin_password
