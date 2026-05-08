@@ -1,0 +1,62 @@
+trigger:
+- main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+- group: terraform-secrets   # store ARM creds here
+
+stages:
+
+# -------------------------
+# STAGE 1: VALIDATE
+# -------------------------
+- stage: Validate
+  jobs:
+  - job: validate
+    steps:
+
+    - task: TerraformInstaller@1
+      inputs:
+        terraformVersion: 'latest'
+
+    - script: |
+        terraform init
+      displayName: "Terraform Init"
+
+    - script: |
+        terraform validate
+      displayName: "Terraform Validate"
+
+# -------------------------
+# STAGE 2: PLAN
+# -------------------------
+- stage: Plan
+  dependsOn: Validate
+  jobs:
+  - job: plan
+    steps:
+
+    - script: |
+        terraform init
+        terraform plan -out=tfplan
+      displayName: "Terraform Plan"
+
+    - publish: tfplan
+      artifact: tfplan
+
+# -------------------------
+# STAGE 3: APPLY (Manual approval recommended)
+# -------------------------
+- stage: Apply
+  dependsOn: Plan
+  condition: succeeded()
+  jobs:
+  - job: apply
+    steps:
+
+    - script: |
+        terraform init
+        terraform apply -auto-approve
+      displayName: "Terraform Apply"
